@@ -13,34 +13,34 @@ DATA_FILE = Path(os.environ.get("DATA_FILE", "data.json"))
 
 LOCK = threading.Lock()
 
-DEFAULT_DB = {
-    "accounts": [],
-    "requests": []
-}
 
-
-def current_time():
+def now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def save_database():
+def save_data():
     temp_file = DATA_FILE.with_suffix(".tmp")
     temp_file.write_text(json.dumps(database, indent=2))
     temp_file.replace(DATA_FILE)
 
 
-def load_database():
+def load_data():
     if DATA_FILE.exists():
         try:
             return json.loads(DATA_FILE.read_text())
         except json.JSONDecodeError:
             pass
 
-    DATA_FILE.write_text(json.dumps(DEFAULT_DB, indent=2))
-    return json.loads(json.dumps(DEFAULT_DB))
+    data = {
+        "accounts": [],
+        "requests": []
+    }
+
+    DATA_FILE.write_text(json.dumps(data, indent=2))
+    return data
 
 
-database = load_database()
+database = load_data()
 
 
 def find_account(identifier):
@@ -56,7 +56,7 @@ def find_account(identifier):
     return None
 
 
-def aggregation_records():
+def account_records():
     records = []
 
     for account in database["accounts"]:
@@ -66,15 +66,30 @@ def aggregation_records():
             "displayName": account.get("displayName", ""),
             "entitlements": [
                 {
-                    "entitlementId": item.get("entitlementId"),
-                    "status": item.get("status", "ACTIVE")
+                    "entitlementId": entitlement.get("entitlementId"),
+                    "status": entitlement.get("status", "ACTIVE")
                 }
-                for item in account.get("entitlements", [])
-                if item.get("status", "ACTIVE") == "ACTIVE"
+                for entitlement in account.get("entitlements", [])
+                if entitlement.get("status", "ACTIVE") == "ACTIVE"
             ]
         })
 
     return records
+
+
+def entitlement_records():
+    return [
+        {
+            "id": "MDA_DEVELOPER_CORE",
+            "name": "MDA Developer Core",
+            "description": "Mock entitlement"
+        },
+        {
+            "id": "MDA_DEVELOPER_CDBSLA",
+            "name": "MDA Developer CDBSLA",
+            "description": "Mock entitlement"
+        }
+    ]
 
 
 class WebServiceHandler(BaseHTTPRequestHandler):
@@ -93,8 +108,8 @@ class WebServiceHandler(BaseHTTPRequestHandler):
         self.wfile.write(response)
 
     def read_body(self):
-        content_length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(content_length)
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
 
         if not body:
             return {}
@@ -118,30 +133,26 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                     "service": "sailpoint-stateful-mock"
                 })
 
-            # Entitlement aggregation
             if request_path == "/entitlements":
-                return self.send_json(200, [
-                    {
-                        "id": "MDA_DEVELOPER_CORE",
-                        "name": "MDA Developer Core",
-                        "description": "Mock entitlement"
-                    },
-                    {
-                        "id": "MDA_DEVELOPER_CDBSLA",
-                        "name": "MDA Developer CDBSLA",
-                        "description": "Mock entitlement"
-                    }
-                ])
+                records = entitlement_records()
 
-            # Account aggregation
+                return self.send_json(200, {
+                    "value": records,
+                    "Count": len(records)
+                })
+
             if request_path in (
                 "/aggregation/accounts",
                 "/aggregation",
                 "/accounts"
             ):
-                return self.send_json(200, aggregation_records())
+                records = account_records()
 
-            # Single account lookup
+                return self.send_json(200, {
+                    "value": records,
+                    "Count": len(records)
+                })
+
             if len(parts) == 2 and parts[0] == "accounts":
                 account = find_account(parts[1])
 
@@ -152,7 +163,6 @@ class WebServiceHandler(BaseHTTPRequestHandler):
 
                 return self.send_json(200, account)
 
-            # Single account entitlement lookup
             if (
                 len(parts) == 3
                 and parts[0] == "accounts"
@@ -171,7 +181,6 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                     "entitlements": account.get("entitlements", [])
                 })
 
-            # Request status lookup
             if len(parts) == 2 and parts[0] == "requests":
                 request_id = parts[1]
 
@@ -209,14 +218,16 @@ class WebServiceHandler(BaseHTTPRequestHandler):
             if request_path == "/reset":
                 with LOCK:
                     database.clear()
-                    database.update(json.loads(json.dumps(DEFAULT_DB)))
-                    save_database()
+                    database.update({
+                        "accounts": [],
+                        "requests": []
+                    })
+                    save_data()
 
                 return self.send_json(200, {
                     "success": True
                 })
 
-            # Add or remove entitlement
             if (
                 len(parts) == 3
                 and parts[0] == "accounts"
@@ -265,7 +276,7 @@ class WebServiceHandler(BaseHTTPRequestHandler):
 
                         database["accounts"].append(account)
 
-                    timestamp = current_time()
+                    timestamp = now()
 
                     if operation in ("REMOVE", "DELETE"):
                         account["entitlements"] = [
@@ -301,7 +312,7 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                     }
 
                     database["requests"].append(request_record)
-                    save_database()
+                    save_data()
 
                 return self.send_json(200, {
                     "success": True,
