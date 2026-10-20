@@ -1,0 +1,16 @@
+{
+  "accounts": [
+    {
+      "accountId": "12345",
+      "email": "yousuf.fatah@vizientinc.com",
+      "displayName": "Yousuf Fatah",
+      "entitlements": [
+        {
+          "entitlementId": "MDA_DEVELOPER_CORE",
+          "status": "ACTIVE"
+        }
+      ]
+    }
+  ],
+  "requests": []
+}
