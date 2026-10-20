@@ -66,11 +66,11 @@ def account_records():
             "displayName": account.get("displayName", ""),
             "entitlements": [
                 {
-                    "entitlementId": entitlement.get("entitlementId"),
-                    "status": entitlement.get("status", "ACTIVE")
+                    "entitlementId": item.get("entitlementId"),
+                    "status": item.get("status", "ACTIVE")
                 }
-                for entitlement in account.get("entitlements", [])
-                if entitlement.get("status", "ACTIVE") == "ACTIVE"
+                for item in account.get("entitlements", [])
+                if item.get("status", "ACTIVE") == "ACTIVE"
             ]
         })
 
@@ -133,6 +133,7 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                     "service": "sailpoint-stateful-mock"
                 })
 
+            # Group/entitlement aggregation
             if request_path == "/entitlements":
                 records = entitlement_records()
 
@@ -141,17 +142,14 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                     "Count": len(records)
                 })
 
+            # Account aggregation
+            # Important: return a top-level JSON array.
             if request_path in (
                 "/aggregation/accounts",
                 "/aggregation",
                 "/accounts"
             ):
-                records = account_records()
-
-                return self.send_json(200, {
-                    "value": records,
-                    "Count": len(records)
-                })
+                return self.send_json(200, account_records())
 
             if len(parts) == 2 and parts[0] == "accounts":
                 account = find_account(parts[1])
