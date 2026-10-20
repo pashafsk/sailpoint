@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import json
 import os
 import threading
@@ -26,9 +24,9 @@ def current_time():
 
 
 def save_database():
-    temporary_file = DATA_FILE.with_suffix(".tmp")
-    temporary_file.write_text(json.dumps(database, indent=2))
-    temporary_file.replace(DATA_FILE)
+    temp_file = DATA_FILE.with_suffix(".tmp")
+    temp_file.write_text(json.dumps(database, indent=2))
+    temp_file.replace(DATA_FILE)
 
 
 def load_database():
@@ -62,20 +60,18 @@ def aggregation_records():
     records = []
 
     for account in database["accounts"]:
-        active_entitlements = []
-
-        for entitlement in account.get("entitlements", []):
-            if entitlement.get("status", "ACTIVE") == "ACTIVE":
-                active_entitlements.append({
-                    "entitlementId": entitlement.get("entitlementId"),
-                    "status": entitlement.get("status", "ACTIVE")
-                })
-
         records.append({
             "accountId": account.get("accountId"),
             "email": account.get("email"),
             "displayName": account.get("displayName", ""),
-            "entitlements": active_entitlements
+            "entitlements": [
+                {
+                    "entitlementId": item.get("entitlementId"),
+                    "status": item.get("status", "ACTIVE")
+                }
+                for item in account.get("entitlements", [])
+                if item.get("status", "ACTIVE") == "ACTIVE"
+            ]
         })
 
     return records
@@ -96,18 +92,19 @@ class WebServiceHandler(BaseHTTPRequestHandler):
 
         self.wfile.write(response)
 
-    def read_request_body(self):
+    def read_body(self):
         content_length = int(self.headers.get("Content-Length", "0"))
-        request_body = self.rfile.read(content_length)
+        body = self.rfile.read(content_length)
 
-        if not request_body:
+        if not body:
             return {}
 
-        return json.loads(request_body.decode("utf-8"))
+        return json.loads(body.decode("utf-8"))
 
     def do_GET(self):
         request_path = urlparse(self.path).path
-        path_parts = [
+
+        parts = [
             unquote(part)
             for part in request_path.split("/")
             if part
@@ -121,20 +118,32 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                     "service": "sailpoint-stateful-mock"
                 })
 
-            if request_path == "/aggregation/accounts":
-                return self.send_json(200, aggregation_records())
+            # Entitlement aggregation
+            if request_path == "/entitlements":
+                return self.send_json(200, [
+                    {
+                        "id": "MDA_DEVELOPER_CORE",
+                        "name": "MDA Developer Core",
+                        "description": "Mock entitlement"
+                    },
+                    {
+                        "id": "MDA_DEVELOPER_CDBSLA",
+                        "name": "MDA Developer CDBSLA",
+                        "description": "Mock entitlement"
+                    }
+                ])
 
-            if request_path == "/aggregation":
-                return self.send_json(200, aggregation_records())
-
-            if request_path == "/accounts":
-                return self.send_json(200, aggregation_records())
-
-            if (
-                len(path_parts) == 2
-                and path_parts[0] == "accounts"
+            # Account aggregation
+            if request_path in (
+                "/aggregation/accounts",
+                "/aggregation",
+                "/accounts"
             ):
-                account = find_account(path_parts[1])
+                return self.send_json(200, aggregation_records())
+
+            # Single account lookup
+            if len(parts) == 2 and parts[0] == "accounts":
+                account = find_account(parts[1])
 
                 if not account:
                     return self.send_json(404, {
@@ -143,12 +152,13 @@ class WebServiceHandler(BaseHTTPRequestHandler):
 
                 return self.send_json(200, account)
 
+            # Single account entitlement lookup
             if (
-                len(path_parts) == 3
-                and path_parts[0] == "accounts"
-                and path_parts[2] == "entitlements"
+                len(parts) == 3
+                and parts[0] == "accounts"
+                and parts[2] == "entitlements"
             ):
-                account = find_account(path_parts[1])
+                account = find_account(parts[1])
 
                 if not account:
                     return self.send_json(404, {
@@ -161,17 +171,14 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                     "entitlements": account.get("entitlements", [])
                 })
 
-            if (
-                len(path_parts) == 2
-                and path_parts[0] == "requests"
-            ):
-                request_id = path_parts[1]
+            # Request status lookup
+            if len(parts) == 2 and parts[0] == "requests":
+                request_id = parts[1]
 
                 request_record = next(
                     (
-                        request
-                        for request in database["requests"]
-                        if request.get("requestId") == request_id
+                        item for item in database["requests"]
+                        if item.get("requestId") == request_id
                     ),
                     None
                 )
@@ -190,7 +197,8 @@ class WebServiceHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         request_path = urlparse(self.path).path
-        path_parts = [
+
+        parts = [
             unquote(part)
             for part in request_path.split("/")
             if part
@@ -208,14 +216,15 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                     "success": True
                 })
 
+            # Add or remove entitlement
             if (
-                len(path_parts) == 3
-                and path_parts[0] == "accounts"
-                and path_parts[2] == "entitlements"
+                len(parts) == 3
+                and parts[0] == "accounts"
+                and parts[2] == "entitlements"
             ):
-                body = self.read_request_body()
+                body = self.read_body()
 
-                account_id = path_parts[1]
+                account_id = parts[1]
 
                 email = (
                     body.get("email")
@@ -260,18 +269,18 @@ class WebServiceHandler(BaseHTTPRequestHandler):
 
                     if operation in ("REMOVE", "DELETE"):
                         account["entitlements"] = [
-                            entitlement
-                            for entitlement in account["entitlements"]
-                            if entitlement.get("entitlementId") != entitlement_id
+                            item
+                            for item in account["entitlements"]
+                            if item.get("entitlementId") != entitlement_id
                         ]
 
                     else:
-                        already_exists = any(
-                            entitlement.get("entitlementId") == entitlement_id
-                            for entitlement in account["entitlements"]
+                        exists = any(
+                            item.get("entitlementId") == entitlement_id
+                            for item in account["entitlements"]
                         )
 
-                        if not already_exists:
+                        if not exists:
                             account["entitlements"].append({
                                 "entitlementId": entitlement_id,
                                 "status": "ACTIVE",
