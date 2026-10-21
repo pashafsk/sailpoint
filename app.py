@@ -142,13 +142,15 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                     "Count": len(records)
                 })
 
-            # Account aggregation
-            # Important: return a top-level JSON array.
-            if request_path in (
-                "/aggregation/accounts",
-                "/aggregation",
-                "/accounts"
-            ):
+            # SailPoint Account Aggregation
+            # Root Path in SailPoint: $.accounts
+            if request_path == "/aggregation/accounts":
+                return self.send_json(200, {
+                    "accounts": account_records()
+                })
+
+            # Other account listings (unchanged: top-level array)
+            if request_path in ("/aggregation", "/accounts"):
                 return self.send_json(200, account_records())
 
             if len(parts) == 2 and parts[0] == "accounts":
