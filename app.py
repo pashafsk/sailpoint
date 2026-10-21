@@ -64,6 +64,11 @@ def account_records():
             "accountId": account.get("accountId"),
             "email": account.get("email"),
             "displayName": account.get("displayName", ""),
+            "entitlementIds": [
+                item.get("entitlementId")
+                for item in account.get("entitlements", [])
+                if item.get("status", "ACTIVE") == "ACTIVE"
+            ],
             "entitlements": [
                 {
                     "entitlementId": item.get("entitlementId"),
