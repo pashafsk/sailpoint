@@ -276,14 +276,45 @@ class WebServiceHandler(BaseHTTPRequestHandler):
 
         self.wfile.write(response)
 
-    def read_body(self):
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length)
+    def read_raw_body(self):
+        # Chunked transfer encoding (no Content-Length)
+        if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+            chunks = []
+            while True:
+                size_line = self.rfile.readline().strip()
+                size = int(size_line.split(b";")[0] or b"0", 16)
+                if size == 0:
+                    self.rfile.readline()
+                    break
+                chunks.append(self.rfile.read(size))
+                self.rfile.readline()
+            return b"".join(chunks)
 
-        if not body:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        return self.rfile.read(length) if length > 0 else b""
+
+    def read_body(self):
+        raw = self.read_raw_body()
+        self.last_raw_body = raw.decode("utf-8", errors="replace")
+
+        if not raw.strip():
             return {}
 
-        return json.loads(body.decode("utf-8"))
+        text = self.last_raw_body.strip()
+
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else {"value": data}
+        except json.JSONDecodeError:
+            pass
+
+        # Form-encoded body: a=1&b=2
+        from urllib.parse import parse_qs
+        form = parse_qs(text)
+        if form:
+            return {k: v[0] if len(v) == 1 else v for k, v in form.items()}
+
+        raise ValueError(f"Body is not valid JSON: {text[:300]}")
 
     def do_GET(self):
         request_path = urlparse(self.path).path
@@ -413,7 +444,17 @@ class WebServiceHandler(BaseHTTPRequestHandler):
             # applies any entitlements sent with the request.
             if request_path == "/accounts":
                 body = self.read_body()
-                print(f"[CREATE] received body={json.dumps(body)}", flush=True)
+
+                # Also accept values passed in the URL query string
+                from urllib.parse import parse_qs
+                for key, values in parse_qs(urlparse(self.path).query).items():
+                    body.setdefault(key, values[0])
+
+                print(
+                    f"[CREATE] headers={dict(self.headers)} "
+                    f"raw_body={getattr(self, 'last_raw_body', '')!r}",
+                    flush=True
+                )
 
                 def clean(value):
                     # Ignore empty values and unreplaced SailPoint variables
@@ -431,7 +472,11 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                 if not account_id:
                     return self.send_json(400, {
                         "error": "accountId and email are both empty",
-                        "received": body
+                        "received": body,
+                        "raw_body": getattr(self, "last_raw_body", ""),
+                        "content_type": self.headers.get("Content-Type"),
+                        "content_length": self.headers.get("Content-Length"),
+                        "transfer_encoding": self.headers.get("Transfer-Encoding")
                     })
 
                 entitlement_ids = parse_entitlements(
