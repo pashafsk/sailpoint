@@ -389,34 +389,49 @@ class WebServiceHandler(BaseHTTPRequestHandler):
 
                 account_id = parts[1]
 
+                # Email is optional: SailPoint identifies the account by the
+                # accountId in the URL ($plan.nativeIdentity$).
                 email = (
                     body.get("email")
                     or body.get("username")
                     or body.get("identity")
+                    or ""
                 )
 
-                entitlement_id = (
+                raw_entitlement = (
                     body.get("entitlementId")
                     or body.get("entitlement_id")
                     or body.get("id")
                 )
 
+                # SailPoint may send one value or a list of values.
+                if isinstance(raw_entitlement, list):
+                    entitlement_ids = [str(v) for v in raw_entitlement if v]
+                elif raw_entitlement:
+                    entitlement_ids = [str(raw_entitlement)]
+                else:
+                    entitlement_ids = []
+
                 operation = str(
                     body.get("operation", "ADD")
                 ).upper()
 
-                if not email:
-                    return self.send_json(400, {
-                        "error": "email is required"
-                    })
-
-                if not entitlement_id:
+                if not entitlement_ids:
                     return self.send_json(400, {
                         "error": "entitlementId is required"
                     })
 
+                entitlement_id = (
+                    entitlement_ids[0]
+                    if len(entitlement_ids) == 1
+                    else entitlement_ids
+                )
+
                 with LOCK:
-                    account = find_account(email)
+                    account = find_account(account_id)
+
+                    if not account and email:
+                        account = find_account(email)
 
                     if not account:
                         account = {
@@ -428,27 +443,32 @@ class WebServiceHandler(BaseHTTPRequestHandler):
 
                         database["accounts"].append(account)
 
+                    if email and not account.get("email"):
+                        account["email"] = email
+
+                    email = account.get("email", "")
                     timestamp = now()
 
-                    if operation in ("REMOVE", "DELETE"):
-                        account["entitlements"] = [
-                            item
-                            for item in account["entitlements"]
-                            if item.get("entitlementId") != entitlement_id
-                        ]
+                    for value in entitlement_ids:
+                        if operation in ("REMOVE", "DELETE"):
+                            account["entitlements"] = [
+                                item
+                                for item in account["entitlements"]
+                                if item.get("entitlementId") != value
+                            ]
 
-                    else:
-                        exists = any(
-                            item.get("entitlementId") == entitlement_id
-                            for item in account["entitlements"]
-                        )
+                        else:
+                            exists = any(
+                                item.get("entitlementId") == value
+                                for item in account["entitlements"]
+                            )
 
-                        if not exists:
-                            account["entitlements"].append({
-                                "entitlementId": entitlement_id,
-                                "status": "ACTIVE",
-                                "addedAt": timestamp
-                            })
+                            if not exists:
+                                account["entitlements"].append({
+                                    "entitlementId": value,
+                                    "status": "ACTIVE",
+                                    "addedAt": timestamp
+                                })
 
                     request_id = f"req-{uuid.uuid4()}"
 
