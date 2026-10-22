@@ -233,6 +233,34 @@ def entitlement_records():
     return records
 
 
+def parse_entitlements(raw):
+    """Accept a list, a single value, or a list rendered as text
+    such as '[A, B]' and return a clean list of entitlement values."""
+    if raw is None:
+        return []
+
+    if isinstance(raw, list):
+        return [str(v).strip() for v in raw if str(v).strip()]
+
+    text = str(raw).strip()
+
+    if not text:
+        return []
+
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(v).strip() for v in parsed if str(v).strip()]
+        except json.JSONDecodeError:
+            pass
+
+        inner = text[1:-1]
+        return [v.strip().strip('"') for v in inner.split(",") if v.strip()]
+
+    return [text]
+
+
 class WebServiceHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
@@ -380,6 +408,83 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                     "success": True
                 })
 
+            # SailPoint Create Account: POST /accounts
+            # Creates the account (or reuses it if it already exists) and
+            # applies any entitlements sent with the request.
+            if request_path == "/accounts":
+                body = self.read_body()
+
+                account_id = str(body.get("accountId") or "").strip()
+                email = str(body.get("email") or "").strip()
+                display_name = str(body.get("displayName") or "").strip()
+
+                if not account_id:
+                    return self.send_json(400, {
+                        "error": "accountId is required"
+                    })
+
+                entitlement_ids = parse_entitlements(
+                    body.get("entitlements")
+                    or body.get("entitlementIds")
+                    or body.get("entitlementId")
+                )
+
+                with LOCK:
+                    account = find_account(account_id)
+
+                    if not account and email:
+                        account = find_account(email)
+
+                    if not account:
+                        account = {
+                            "accountId": account_id,
+                            "email": email,
+                            "displayName": display_name,
+                            "entitlements": []
+                        }
+                        database["accounts"].append(account)
+
+                    if email and not account.get("email"):
+                        account["email"] = email
+
+                    if display_name and not account.get("displayName"):
+                        account["displayName"] = display_name
+
+                    timestamp = now()
+
+                    for value in entitlement_ids:
+                        exists = any(
+                            item.get("entitlementId") == value
+                            for item in account["entitlements"]
+                        )
+
+                        if not exists:
+                            account["entitlements"].append({
+                                "entitlementId": value,
+                                "status": "ACTIVE",
+                                "addedAt": timestamp
+                            })
+
+                    database["requests"].append({
+                        "requestId": f"req-{uuid.uuid4()}",
+                        "accountId": account["accountId"],
+                        "email": account.get("email", ""),
+                        "entitlementId": entitlement_ids,
+                        "operation": "CREATE",
+                        "status": "COMPLETED",
+                        "requestedAt": timestamp,
+                        "completedAt": timestamp
+                    })
+
+                    save_data()
+
+                    result = next(
+                        record for record in account_records()
+                        if record["accountId"] == account["accountId"]
+                    )
+
+                return self.send_json(200, result)
+
             if (
                 len(parts) == 3
                 and parts[0] == "accounts"
@@ -405,12 +510,7 @@ class WebServiceHandler(BaseHTTPRequestHandler):
                 )
 
                 # SailPoint may send one value or a list of values.
-                if isinstance(raw_entitlement, list):
-                    entitlement_ids = [str(v) for v in raw_entitlement if v]
-                elif raw_entitlement:
-                    entitlement_ids = [str(raw_entitlement)]
-                else:
-                    entitlement_ids = []
+                entitlement_ids = parse_entitlements(raw_entitlement)
 
                 operation = str(
                     body.get("operation", "ADD")
