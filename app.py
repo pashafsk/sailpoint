@@ -413,14 +413,25 @@ class WebServiceHandler(BaseHTTPRequestHandler):
             # applies any entitlements sent with the request.
             if request_path == "/accounts":
                 body = self.read_body()
+                print(f"[CREATE] received body={json.dumps(body)}", flush=True)
 
-                account_id = str(body.get("accountId") or "").strip()
-                email = str(body.get("email") or "").strip()
-                display_name = str(body.get("displayName") or "").strip()
+                def clean(value):
+                    # Ignore empty values and unreplaced SailPoint variables
+                    text = str(value or "").strip()
+                    if not text or (text.startswith("$") and text.endswith("$")):
+                        return ""
+                    return text
+
+                email = clean(body.get("email"))
+                display_name = clean(body.get("displayName"))
+
+                # Fall back to email when SailPoint sends no accountId
+                account_id = clean(body.get("accountId")) or email
 
                 if not account_id:
                     return self.send_json(400, {
-                        "error": "accountId is required"
+                        "error": "accountId and email are both empty",
+                        "received": body
                     })
 
                 entitlement_ids = parse_entitlements(
