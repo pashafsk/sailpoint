@@ -11,6 +11,11 @@ HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "3000"))
 DATA_FILE = Path(os.environ.get("DATA_FILE", "data.json"))
 
+# Storage: Postgres when DATABASE_URL is set (persists across restarts and
+# redeploys), otherwise the local data.json file (for local PyCharm runs).
+DATABASE_URL = os.environ.get("DATABASE_URL")
+STORAGE = "postgres" if DATABASE_URL else "file"
+
 LOCK = threading.Lock()
 
 
@@ -18,26 +23,111 @@ def now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def save_data():
-    temp_file = DATA_FILE.with_suffix(".tmp")
-    temp_file.write_text(json.dumps(database, indent=2))
-    temp_file.replace(DATA_FILE)
+def empty_data():
+    return {
+        "accounts": [],
+        "requests": []
+    }
 
 
-def load_data():
+def read_seed_file():
     if DATA_FILE.exists():
         try:
             return json.loads(DATA_FILE.read_text())
         except json.JSONDecodeError:
             pass
 
-    data = {
-        "accounts": [],
-        "requests": []
-    }
+    return None
 
+
+# ---------- Postgres storage ----------
+
+def pg_connect():
+    import psycopg2
+    return psycopg2.connect(DATABASE_URL)
+
+
+def pg_load():
+    conn = pg_connect()
+
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS mock_state ("
+                " id INTEGER PRIMARY KEY,"
+                " data JSONB NOT NULL,"
+                " updated_at TIMESTAMPTZ NOT NULL DEFAULT now()"
+                ")"
+            )
+            cur.execute("SELECT data FROM mock_state WHERE id = 1")
+            row = cur.fetchone()
+
+            if row:
+                print("[STORAGE] Loaded state from Postgres", flush=True)
+                return row[0]
+
+            # First run on an empty database: import data.json if the repo
+            # has one, so existing test accounts carry over.
+            data = read_seed_file() or empty_data()
+            cur.execute(
+                "INSERT INTO mock_state (id, data) VALUES (1, %s)",
+                (json.dumps(data),)
+            )
+            print("[STORAGE] Initialized Postgres state", flush=True)
+            return data
+    finally:
+        conn.close()
+
+
+def pg_save(data):
+    conn = pg_connect()
+
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO mock_state (id, data, updated_at)"
+                " VALUES (1, %s, now())"
+                " ON CONFLICT (id) DO UPDATE"
+                " SET data = EXCLUDED.data, updated_at = now()",
+                (json.dumps(data),)
+            )
+    finally:
+        conn.close()
+
+
+# ---------- File storage ----------
+
+def file_load():
+    data = read_seed_file()
+
+    if data is not None:
+        return data
+
+    data = empty_data()
     DATA_FILE.write_text(json.dumps(data, indent=2))
     return data
+
+
+def file_save(data):
+    temp_file = DATA_FILE.with_suffix(".tmp")
+    temp_file.write_text(json.dumps(data, indent=2))
+    temp_file.replace(DATA_FILE)
+
+
+# ---------- Public API used by the handlers ----------
+
+def save_data():
+    if STORAGE == "postgres":
+        pg_save(database)
+    else:
+        file_save(database)
+
+
+def load_data():
+    if STORAGE == "postgres":
+        return pg_load()
+
+    return file_load()
 
 
 database = load_data()
@@ -82,25 +172,71 @@ def account_records():
     return records
 
 
+# Entitlement catalog returned to SailPoint Group Aggregation.
+# The id is the exact entitlement value SailPoint stores and sends
+# on provisioning, so keep these strings stable once aggregated.
+ENTITLEMENTS = [
+    "MDA_DEVELOPER_CORE",
+    "MDA_DEVELOPER_CDBSLA",
+    "Clinical Data Base (CDB) | CaseProfileReader",
+    "Clinical Data Base (CDB) | CDBDashboardReader",
+    "Clinical Data Base (CDB) | CDBDownloads",
+    "Clinical Data Base (CDB) | CDBReader",
+    "Clinical Data Base (CDB) | CRMDownloads",
+    "Clinical Data Base (CDB) | CRMReader",
+    "Clinical Data Base (CDB) | ExpressionWriter",
+    "Clinical Data Base (CDB) | OPPEReader",
+    "Clinical Data Base (CDB) | PhysicianDataReader",
+    "Clinical Data Base (CDB) | PhysicianProfile",
+    "Clinical Practice Solution Center (CPSC) |Events Calendar",
+    "Clinical Practice Solution Center (CPSC) |Full Access",
+    "Clinical Practice Solution Center (CPSC) |IA Cognos ReportNet Server (PRO-IA-CognosReportNet)",
+    "Clinical Practice Solution Center (CPSC) |Member Directory",
+    "Clinical Practice Solution Center (CPSC) |Member participation",
+    "Clinical Practice Solution Center (CPSC) |Opportunity Dashboard (PRO -FPSC-ALL)",
+    "Clinical Practice Solution Center (CPSC) |PRO-FPSC-ALL",
+    "Clinical Practice Solution Center (CPSC) |Staff Directory",
+    "Operational Data Base (ODB) |ODB Reports: Administration",
+    "Operational Data Base (ODB) |ODB Reports: Advanced Reports",
+    "Operational Data Base (ODB) |ODB Reports: Client Indicators",
+    "Operational Data Base (ODB) |ODB Reports: Compare Groups",
+    "Operational Data Base (ODB) |ODB Reports: Department Reports",
+    "Operational Data Base (ODB) |ODB Reports: Executive Reports",
+    "Operational Data Base (ODB) |ODB Reports: Generic Reports",
+    "Operational Data Base (ODB) |ODB Reports: Internal Administration (Internal Use)",
+    "Operational Data Base (ODB) |ODB Reports: IOA Report",
+    "Operational Data Base (ODB) |ODB Reports: Item Sharing",
+    "Operational Data Base (ODB) |ODB Reports: Managers",
+    "Operational Data Base (ODB) |ODB Reports: User Impersonation",
+    "Operational Data Base (ODB) |ODB SEC: DRM",
+    "Operational Data Base (ODB) |ODB SEC: Support",
+    "Operational Data Base (ODB) |ODB Security: (Must For All ODB Security Users)",
+    "Operational Dashboard |Operational Dashboard : ODB Product Support Staff",
+    "Procedural Analytics - Data Download",
+    "Staff Access-PHI",
+    "Performance Dashboard |ODB Product Support Staff",
+    "AQA Calculator",
+]
+
+
 def entitlement_records():
-    return [
-        {
-            "id": "MDA_DEVELOPER_CORE",
-            "name": "MDA Developer Core",
-            "description": "Mock entitlement"
-        },
-        {
-            "id": "MDA_DEVELOPER_CDBSLA",
-            "name": "MDA Developer CDBSLA",
-            "description": "Mock entitlement"
-        }
-    ]
+    records = []
+
+    for value in ENTITLEMENTS:
+        application = value.split("|")[0].strip() if "|" in value else value
+        records.append({
+            "id": value,
+            "name": value,
+            "description": application
+        })
+
+    return records
 
 
 class WebServiceHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
-        print(format % args)
+        print(format % args, flush=True)
 
     def send_json(self, status_code, data):
         response = json.dumps(data).encode("utf-8")
@@ -135,7 +271,9 @@ class WebServiceHandler(BaseHTTPRequestHandler):
             if request_path == "/health":
                 return self.send_json(200, {
                     "status": "ok",
-                    "service": "sailpoint-stateful-mock"
+                    "service": "sailpoint-stateful-mock",
+                    "storage": STORAGE,
+                    "accounts": len(database["accounts"])
                 })
 
             # Group/entitlement aggregation
@@ -150,8 +288,17 @@ class WebServiceHandler(BaseHTTPRequestHandler):
             # SailPoint Account Aggregation
             # Root Path in SailPoint: $.accounts
             if request_path == "/aggregation/accounts":
+                records = account_records()
+                print(
+                    f"[AGGREGATION] {now()} "
+                    f"client={self.client_address[0]} "
+                    f"user_agent={self.headers.get('User-Agent')} "
+                    f"accounts_returned={len(records)} "
+                    f"body={json.dumps({'accounts': records})}",
+                    flush=True
+                )
                 return self.send_json(200, {
-                    "accounts": account_records()
+                    "accounts": records
                 })
 
             # Other account listings (unchanged: top-level array)
